@@ -1,0 +1,302 @@
+@Operation(summary = "Получение адресного ярлыка и трек номера из системы PayPost")
+    @ApiResponses(
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "",
+                    content = @Content(schema = @Schema(implementation = OrderPostDto.class)))
+    )
+    @PostMapping("/cancelTrackNumber")
+    public ResponseEntity cancelTrackNumberWithKazpost(@Valid @RequestBody OrderPostDto dto) {
+        LOGGER.info("Отмена трек номера через Казпочту для заказа: " + dto);
+        OrderPostDto result = orderProductTsrService.getTrackNumberFromPayPost(dto);
+        if (result != null) {
+            return ApiResponse.OK(result);
+        } else {
+            return ApiResponse.RESULT(HttpStatus.INTERNAL_SERVER_ERROR, "Something went wrong", false);
+        }
+    }
+ public OrderPostDto getTrackNumberFromPayPost(OrderPostDto dto) {
+        Integer mailCount = variableRepository.MAIL_COUNT();
+
+        if (isNull(dto.getOrderId())) {
+            return errorOrderPostDto("ERROR.58");
+        }
+
+
+        Integer requestMethod;
+        if (dto.getRequestMethod().equals(1)) {
+            requestMethod = 1;
+        } else if (dto.getRequestMethod().equals(2)) {
+            requestMethod = 2;
+        } else if (dto.getRequestMethod().equals(3)) {
+            requestMethod = 3;
+        } else {
+            requestMethod = 0;
+        }
+        if (requestMethod.equals(1) || requestMethod.equals(2)) {
+            if (isNull(dto.getMailCount())) {
+                return errorOrderPostDto("ERROR.58");
+            }
+            if (dto.getMailCount() > mailCount) {
+                return errorOrderPostDto("ERROR.388", mailCount);
+            }
+        }
+        if (requestMethod.equals(3)) {
+            if (isNull(dto.getMailList()) || dto.getMailList().isEmpty()) {
+                return errorOrderPostDto("ERROR.58");
+            }
+            if (dto.getMailList().size() > mailCount) {
+                return errorOrderPostDto("ERROR.388", mailCount);
+            }
+        }
+
+
+        if (isNull(currentUserService.getCurrentUser()) || isNull(currentUserService.getCurrentUser().getProviderMemberId())) {
+            return errorOrderPostDto("ERROR.386");
+        }
+        OrderProductTsr orderProductTsr = orderProductTsrRepository.findByIdAndSupplierId
+                (dto.getOrderId(), currentUserService.getCurrentUser().getProviderMemberId());
+        try {
+            if (isNull(orderProductTsr)) {
+                return errorOrderPostDto("ERROR.58");
+            } else if (!orderProductTsr.getOrderProductTsrStatusHistory().getOrderProductTsrStatus().getCode().equals(DOrderProductTsrStatus.RESERVED)) {
+                return errorOrderPostDto("ERROR.240");
+            } else {
+                ProductTsr pTsr = orderProductTsr.getProductTsr();
+
+                if (!orderProductTsr.getHasAccompanyingServices() && !orderProductTsr.getIsSupplierAddress()) {
+                    RealEstateOfMember estate = realEstateService.getRealEstateById(orderProductTsr.getRealEstateOfMemberId());
+                    KatoLevelsDto katoProvider = katoService.getParents(estate.getKato());
+
+                    ConsumerDeliveryAddress consumerDeliveryAddress = orderProductTsr.getConsumerDeliveryAddress();
+                    String consumerKato;
+                    String consumerStreet;
+                    String consumerHouse;
+                    if (nonNull(consumerDeliveryAddress)) {
+                        consumerKato = nonNull(consumerDeliveryAddress.getKato()) ? consumerDeliveryAddress.getKato().getTe() : null;
+                        consumerStreet = consumerDeliveryAddress.getStreet();
+                        consumerHouse = consumerDeliveryAddress.getHouse();
+                        String consumerApt = consumerDeliveryAddress.getApt();
+                        if (nonNull(consumerApt)) {
+                            consumerHouse += ", " + consumerApt;
+                        }
+                        if (isNull(consumerStreet)) {
+                            consumerStreet = consumerDeliveryAddress.getAddress();
+                            consumerHouse = ".";
+                        }
+                    } else {
+                        consumerKato = orderProductTsr.getConsumerAddressKato();
+                        consumerStreet = orderProductTsr.getConsumerAddress();
+                        consumerHouse = ".";
+                    }
+
+                    if (isNull(consumerKato) || isNull(consumerStreet) || isNull(consumerHouse)) {
+                        return errorOrderPostDto("ERROR.389");
+                    }
+                    KatoLevelsDto katoRecipient = katoService.getParents(katoService.getByCodeKato(consumerKato));
+
+                    //Получение трек номера из Казпочты PSU-320
+                    int mailCtg = 2;
+                    if (nonNull(orderProductTsr.getPaymentType()) &&
+                            orderProductTsr.getPaymentType().equals(PaymentType.CASH_ON_DELIVERY) && orderProductTsr.sumOfSurcharges().intValue() > 0) {
+                        mailCtg = 4;
+                    }
+
+                    BigDecimal price = orderProductTsr.sumOfPrice();
+                    BigDecimal payment = orderProductTsr.sumOfSurcharges();
+
+                    LabelRequest labelRequest = LabelRequest.builder()
+                            .provider(Provider.builder()
+                                    .uin(orderProductTsr.getSupplier().getIinBin())
+                                    .fullName(orderProductTsr.getSupplier().getFullName().getValueRu())
+                                    .phone(orderProductTsr.getSupplier().getContactPhone())
+                                    .phoneLong(convertPhoneToLong(orderProductTsr.getSupplier().getContactPhone()))
+                                    .email(orderProductTsr.getSupplier().getEmail())
+                                    .country("Казахстан")
+                                    .index(orderProductTsr.getRealEstateOfMember().getKato().getIndex())
+                                    .city(getKato(katoProvider, 1))
+                                    .district(getKato(katoProvider, 2))
+                                    .street(estate.getAdditionalAddressRu())
+                                    //.house(estate.getAdditionalAddressRu())
+                                    //.address(realEstateService.getFullAddress(orderProductTsr.getRealEstateOfMemberId()).getValueRu())
+                                    .build())
+                            .recipient(Recipient.builder()
+                                    .uin(orderProductTsr.getConsumer().getMember().getIinBin())
+                                    .fullName(orderProductTsr.getRecipientFullName())
+                                    .phone(orderProductTsr.getRecipientPhone())
+                                    .phoneLong(convertPhoneToLong(orderProductTsr.getRecipientPhone()))
+                                    .email(orderProductTsr.getRecipientEmail())
+                                    .country("Казахстан")
+                                    .index(katoService.findIndexByTe(consumerKato))
+                                    .city(getKato(katoRecipient, 1))
+                                    .district(getKato(katoRecipient, 2))
+                                    .street(consumerStreet)
+                                    .house(consumerHouse)
+                                    //.address(katoService.getFullAddressWithAdditionalAddress(orderProductTsr.getConsumerAddressKato(), orderProductTsr.getConsumerAddress()).getValueRu())
+                                    .build())
+                            .productTsr(productTsr(pTsr, price, mailCtg, payment).getProductTsr())
+                            .requestOrder(RequestOrder.builder()
+                                    .orderNumber(orderProductTsr.getOrderNumber())
+                                    .mailCount(dto.getMailCount())
+                                    .mailCtg(mailCtg)
+                                    .build())
+                            .build();
+
+
+                    List<String> barcodes;
+                    List<String> addrLetPdfs;
+                    if (requestMethod.equals(1) && dto.getMailCount() == 1 || requestMethod.equals(0) && dto.getMailCount() == 1) {
+                        kz.inessoft.proon.paypost.services.postrates.GetAddrLetterResponse getAddrLetterResponse = postService.getAddrLetter(labelRequest);
+                        if (isNull(getAddrLetterResponse) || isNull(getAddrLetterResponse.getBarcodes()) || getAddrLetterResponse.getBarcodes().isEmpty()) {
+                            throw new OrderProductTsrException(nonNull(getAddrLetterResponse)
+                                    && nonNull(getAddrLetterResponse.getResponseInfo())
+                                    && nonNull(getAddrLetterResponse.getResponseInfo().getResponseText())
+                                    ? "Казпочта: " + getAddrLetterResponse.getResponseInfo().getResponseText() : "ERROR.68");
+                        }
+                        barcodes = getAddrLetterResponse.getBarcodes();
+                        addrLetPdfs = getAddrLetterResponse.getAddrLetPdfs();
+                    } else {
+                        List<Mail> mailList = new ArrayList<>();
+                        if (requestMethod.equals(2) || requestMethod.equals(0)) {
+                            BigDecimal weight = BigDecimal.valueOf(pTsr.getWeightWithPackage()); //Precision?????
+                            BigDecimal pricePerMail = price.divide(BigDecimal.valueOf(dto.getMailCount()), 0, RoundingMode.FLOOR); //Precision?????
+                            BigDecimal paymentPerMail = payment.divide(BigDecimal.valueOf(dto.getMailCount()), 0, RoundingMode.FLOOR); //Precision?????
+                            BigDecimal priceRem = price.subtract(pricePerMail.multiply(BigDecimal.valueOf(dto.getMailCount())));
+                            BigDecimal paymentRem = payment.subtract(paymentPerMail.multiply(BigDecimal.valueOf(dto.getMailCount())));
+
+                            for (int m = 0; m < dto.getMailCount(); m++) {
+                                if (m == dto.getMailCount() - 1) {
+                                    mailList.add(weightValueToMail(weight, pricePerMail.add(priceRem), paymentPerMail.add(paymentRem), mailCtg));
+                                } else {
+                                    mailList.add(weightValueToMail(weight, pricePerMail, paymentPerMail, mailCtg));
+                                }
+                            }
+                            labelRequest.setMails(mailList);
+                        } else if (requestMethod.equals(1) && dto.getMailCount() > 1 && !dto.getMailList().isEmpty()) {
+                            for (MailDto mailDto : dto.getMailList()) {
+                                mailList.add(Mail.builder()
+                                        .weight(BigDecimal.valueOf(mailDto.getWeight().doubleValue()))
+                                        .value(BigDecimal.valueOf(mailDto.getValue().doubleValue()))
+                                        .payment(mailCtg == 4 ? mailDto.getPayment() : BigDecimal.ZERO)
+                                        .build());
+                            }
+                            labelRequest.setMails(mailList);
+                        } else {
+                            BigDecimal priceSum = BigDecimal.valueOf(0);
+                            BigDecimal paymentSum = BigDecimal.valueOf(0);
+
+                            for (MailDto mailDto : dto.getMailList()) {
+                                if (isNull(mailDto.getWeight()) || isNull(mailDto.getValue())
+                                        || mailDto.getWeight().compareTo(BigDecimal.ZERO) <= 0
+                                        || mailDto.getValue().compareTo(BigDecimal.ZERO) <= 0
+                                        || mailDto.getValue().scale() > 2) {
+                                    return errorOrderPostDto("ERROR.407");
+                                }
+                                if (mailCtg == 4 && isNull(mailDto.getPayment())) {
+                                    return errorOrderPostDto("ERROR.407");
+                                }
+                                if (mailCtg == 4 && nonNull(mailDto.getPayment())
+                                        && (mailDto.getPayment().compareTo(BigDecimal.ZERO) <= 0
+                                        || mailDto.getValue().compareTo(mailDto.getPayment()) <= 0
+                                        || mailDto.getPayment().scale() > 2)) {
+                                    return errorOrderPostDto("ERROR.407");
+                                }
+                                if (mailCtg != 4 && nonNull(mailDto.getPayment())
+                                        && mailDto.getPayment().compareTo(BigDecimal.ZERO) > 0) {
+                                    return errorOrderPostDto("ERROR.408");
+                                }
+                                mailList.add(mailDtoToMail(mailDto, mailCtg));
+
+                                priceSum = priceSum.add(mailDto.getValue());
+                                if (mailCtg == 4) {
+                                    paymentSum = paymentSum.add(mailDto.getPayment());
+                                }
+                            }
+
+                            if (price.compareTo(priceSum) != 0) {
+                                return errorOrderPostDto("ERROR.409");
+                            }
+
+                            if (mailCtg == 4 && payment.compareTo(paymentSum) != 0) {
+                                return errorOrderPostDto("ERROR.409");
+                            }
+
+                            labelRequest.setMails(mailList);
+                            labelRequest.getRequestOrder().setMailCount(dto.getMailList().size());
+                        }
+                        kz.inessoft.proon.paypost.services.postrates.GetAddrLetterBatchResponse getAddrLetterBatchResponse = postService.getGetAddrLetterBatch(labelRequest);
+                        if (isNull(getAddrLetterBatchResponse) || isNull(getAddrLetterBatchResponse.getBarcodes()) || getAddrLetterBatchResponse.getBarcodes().isEmpty()) {
+                            throw new OrderProductTsrException(nonNull(getAddrLetterBatchResponse)
+                                    && nonNull(getAddrLetterBatchResponse.getResponseInfo())
+                                    && nonNull(getAddrLetterBatchResponse.getResponseInfo().getResponseText())
+                                    ? "Казпочта: " + getAddrLetterBatchResponse.getResponseInfo().getResponseText() : "ERROR.68");
+                        }
+                        barcodes = getAddrLetterBatchResponse.getBarcodes();
+                        addrLetPdfs = getAddrLetterBatchResponse.getAddrLetPdfs();
+                    }
+
+                    try {
+                        ResponseDto responseDto = mtsznEsobesSentService.sendRequest(orderProductTsr, new Date(), DOrderProductTsrStatus.TRACK_NUMBER_ASSIGNED);
+                        if (nonNull(responseDto)) {
+                            if (responseDto.getStatus().getCode().equals(STATUS_BUSSINESS_DATA_ERROR)) {
+                                dto.setError(esobesErrorDto(responseDto));
+                                return dto;
+                            }
+                            boolean receivedAddrLetPdfs = false;
+                            if (nonNull(addrLetPdfs) && !addrLetPdfs.isEmpty() && addrLetPdfs.size() == barcodes.size()) {
+                                receivedAddrLetPdfs = true;
+                            }
+                            for (int i = 0; i < barcodes.size(); i++) {
+                                Track track = Track.builder()
+                                        .creationDate(new Date())
+                                        .orderProductTsr(orderProductTsr)
+                                        .trackNumber(barcodes.get(i))
+                                        //.addressLetterPdf(addrLetPdfs.get(i))
+                                        .build();
+                                if (receivedAddrLetPdfs) {
+                                    track.setAddressLetterPdf(addrLetPdfs.get(i));
+                                } else {
+                                    kz.inessoft.proon.paypost.services.postrates.GetAddrLetterUsingBarcodeResponse getAddrLetterUsingBarcodeResponse =
+                                            postService.getAddrLetterUsingBarcode(RequestOrder.builder()
+                                                    .trackNumber(barcodes.get(i))
+                                                    .build());
+                                    if (nonNull(getAddrLetterUsingBarcodeResponse) && nonNull(getAddrLetterUsingBarcodeResponse.getAddrLetPdf())) {
+                                        track.setAddressLetterPdf(getAddrLetterUsingBarcodeResponse.getAddrLetPdf());
+                                    } else {
+                                        throw new OrderProductTsrException(nonNull(getAddrLetterUsingBarcodeResponse) && nonNull(getAddrLetterUsingBarcodeResponse.getResponseInfo())
+                                                && nonNull(getAddrLetterUsingBarcodeResponse.getResponseInfo().getResponseText())
+                                                ? "Казпочта: " + getAddrLetterUsingBarcodeResponse.getResponseInfo().getResponseText() : "ERROR.68");
+                                    }
+                                }
+                                trackRepository.save(track);
+                            }
+                            OrderProductTsrStatusHistory statusHistory = OrderProductTsrStatusHistory.builder()
+                                    .authorId(currentUserService.getCurrentUser().getMemberId())
+                                    .creationDate(new Date())
+                                    .orderProductTsr(orderProductTsr)
+                                    .orderProductTsrStatus(tsrStatusRepository.findByCode(DOrderProductTsrStatus.TRACK_NUMBER_ASSIGNED))
+                                    .build();
+                            orderProductTsr.setOrderProductTsrStatusHistory(statusHistory);
+                            orderProductTsr.setMailCount(barcodes.size());
+                            orderProductTsrRepository.save(orderProductTsr);
+                                /*notificationConsumer.send(orderProductTsr, "N.032", Arrays.asList(orderProductTsr.getOrderNumber()
+                                        , orderProductTsr.sumOfPrice().toString(), labelPage.getTrackNumber(), labelPage.getTrackingUrl()));
+                                notificationConsumer.send(orderProductTsr, "N.034", Arrays.asList(orderProductTsr.getOrderNumber()
+                                        , orderProductTsr.sumOfPrice().toString(), labelPage.getTrackNumber(), labelPage.getTrackingUrl(), labelPage.getAddressLabelUrl()));
+                                notificationConsumer.send(orderProductTsr, "N.034", Arrays.asList(orderProductTsr.getOrderNumber()
+                                        , orderProductTsr.sumOfPrice().toString(), labelPage.getTrackNumber(), labelPage.getTrackingUrl(), labelPage.getAddressLabelUrl()), PROVIDER);*/
+                            dto.setMailCount(barcodes.size());
+                            return dto;
+                        } else {
+                            return errorOrderPostDto("ERROR.241");
+                        }
+                    } catch (MTSZNEsobesExeption | IOException e) {
+                        log.warn(e.getMessage());
+                        return errorOrderPostDto("ERROR.241");
+                    }
+                }
+
+                return null;
+            }
+        } catch (OrderProductTsrException e) {
+            return errorOrderPostDto(e.getMessage());
+        }
+    }
